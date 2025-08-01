@@ -1,63 +1,76 @@
 import pandas as pd
-import pymysql
 from sqlalchemy import create_engine, text
+import pymysql
 
-# Step 1: Ensure database exists
-temp_engine = create_engine("mysql+pymysql://root:Maha2301##@localhost/")
-with temp_engine.connect() as conn:
-    conn.execute(text("CREATE DATABASE IF NOT EXISTS video_game_db;"))
-    print("✅ Database 'video_game_db' ensured.")
+# DB credentials
+DB_USER = "root"
+DB_PASS = "Maha2301##"
+DB_HOST = "localhost"
+DB_NAME = "video_game_db"
 
-# Step 2: Load CSVs
-games_df = pd.read_csv("cleaned_games.csv")
-sales_df = pd.read_csv("cleaned_vgsales.csv")
+# Create DB if not exists
+engine_temp = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/")
+with engine_temp.connect() as conn:
+    conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {DB_NAME};"))
+print("✅ Database ready.")
 
-# Step 3: Normalize titles (important for joining)
+# Load CSVs
+try:
+    games_df = pd.read_csv("cleaned_games.csv")
+    sales_df = pd.read_csv("cleaned_vgsales.csv")
+except Exception as e:
+    print("❌ Error loading CSVs:", e)
+    exit(1)
+
+# Rename title columns
+game_col = next((col for col in ["name", "title", "Title"] if col in games_df.columns), None)
+sales_col = next((col for col in ["title", "Name"] if col in sales_df.columns), None)
+
+if not game_col or not sales_col:
+    print("❌ Required title columns not found.")
+    print("📌 Games cols:", games_df.columns.tolist())
+    print("📌 Sales cols:", sales_df.columns.tolist())
+    exit(1)
+
+games_df.rename(columns={game_col: "game_title"}, inplace=True)
+sales_df.rename(columns={sales_col: "game_title"}, inplace=True)
+
+# Normalize titles
 games_df["game_title"] = games_df["game_title"].str.strip().str.lower()
-sales_df["title"] = sales_df["title"].str.strip().str.lower()
+sales_df["game_title"] = sales_df["game_title"].str.strip().str.lower()
 
-# Step 4: Create game_id using merged dataframe
-merged_df = pd.merge(games_df, sales_df, left_on="game_title", right_on="title", how="inner")
-merged_df.reset_index(drop=True, inplace=True)
-merged_df["game_id"] = merged_df.index + 1  # start IDs from 1
+# Merge data
+merged_df = pd.merge(games_df, sales_df, on="game_title", how="inner")
+print(f"✅ Merged rows: {len(merged_df)}")
 
-# Step 5: Add game_id back to original dataframes
-games_df = pd.merge(games_df, merged_df[["game_title", "game_id"]], on="game_title", how="left")
-sales_df = pd.merge(sales_df, merged_df[["title", "game_id"]], on="title", how="left")
+# Upload to MySQL
+engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}")
+try:
+    games_df.to_sql("games", con=engine, if_exists="replace", index=False)
+    sales_df.to_sql("sales", con=engine, if_exists="replace", index=False)
+    merged_df.to_sql("merged_data", con=engine, if_exists="replace", index=False)
+    print("✅ Tables uploaded.")
+except Exception as e:
+    print("❌ Upload failed:", e)
+    exit(1)
 
-# Step 6: Upload to MySQL
-engine = create_engine("mysql+pymysql://root:Maha2301##@localhost/video_game_db")
-
-games_df.to_sql("games", con=engine, if_exists="replace", index=False)
-sales_df.to_sql("sales", con=engine, if_exists="replace", index=False)
-merged_df.to_sql("merged_data", con=engine, if_exists="replace", index=False)
-
-print("✅ Tables 'games', 'sales', and 'merged_data' uploaded successfully.")
-
-# Step 7: Create merged SQL view using game_id
-create_view_sql = """
+# Create view
+view_sql = """
 CREATE OR REPLACE VIEW merged_view AS
-SELECT 
-    g.game_id,
-    g.game_title,
-    g.genre,
-    g.platform,
-    g.publisher,
-    g.developer,
-    g.release_date,
-    g.rating,
-    g.wishlist,
-    g.number_of_reviews,
-    g.average_playtime,
+SELECT
+    g.*,
     s.global_sales,
     s.na_sales,
     s.eu_sales,
     s.jp_sales,
     s.other_sales
 FROM games g
-JOIN sales s ON g.game_id = s.game_id;
+JOIN sales s ON g.game_title = s.game_title;
 """
 
-with engine.connect() as conn:
-    conn.execute(text(create_view_sql))
-    print("✅ SQL view 'merged_view' created successfully.")
+try:
+    with engine.connect() as conn:
+        conn.execute(text(view_sql))
+    print("✅ View created.")
+except Exception as e:
+    print("❌ View creation failed:", e)
